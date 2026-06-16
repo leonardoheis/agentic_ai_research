@@ -12,10 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
+COPY pyproject.toml /app/pyproject.toml
 # Upgrade pip toolchain to patched versions before installing deps
-RUN pip install --upgrade "setuptools>=78.1.1" "wheel>=0.46.2" && \
-    pip install -r requirements.txt
+RUN pip install --upgrade pip "setuptools>=78.1.1" "wheel>=0.46.2" && \
+    pip install .
 COPY . /app
 
 # Your entrypoint
