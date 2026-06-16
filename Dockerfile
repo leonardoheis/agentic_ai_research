@@ -13,12 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
-RUN pip install -r requirements.txt
+# Upgrade pip toolchain to patched versions before installing deps
+RUN pip install --upgrade "setuptools>=78.1.1" "wheel>=0.46.2" && \
+    pip install -r requirements.txt
 COPY . /app
 
 # Your entrypoint
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 8000 5432
 CMD ["/entrypoint.sh"]

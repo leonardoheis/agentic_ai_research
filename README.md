@@ -28,6 +28,7 @@ This repo includes a Docker setup that runs **Postgres + the API in one containe
 │  └─ entrypoint.sh             # starts Postgres, prepares DB, then launches Uvicorn
 ├─ requirements.txt
 ├─ Dockerfile
+├─ .dockerignore                # excludes .venv, __pycache__, .env, .git from image
 └─ README.md
 ```
 
@@ -46,6 +47,8 @@ This repo includes a Docker setup that runs **Postgres + the API in one containe
   OPENAI_API_KEY=your-open-api-key
   TAVILY_API_KEY=your-tavily-api-key
   ```
+
+  > **Do not add `DATABASE_URL` to `.env`.**  The entrypoint builds it automatically from `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`. Hardcoding it (especially pointing at the `postgres` superuser) will cause authentication failures.
 
 * Python deps are installed by Docker from `requirements.txt`:
 
@@ -134,6 +137,31 @@ curl http://localhost:8000/task_status/<TASK_ID>
 
 ## Troubleshooting
 
+**`env: ‘bash\r’: No such file or directory` on container start**
+
+* Caused by Windows CRLF line endings in `docker/entrypoint.sh`.
+  The Dockerfile already strips them at build time (`sed -i ‘s/\r//’`), so a fresh `docker build` fixes it.
+  If you edit `entrypoint.sh` on Windows, make sure your editor saves with LF endings (in VS Code: bottom-right status bar → change `CRLF` to `LF`).
+
+**`password authentication failed for user "postgres"`**
+
+* You have `DATABASE_URL=postgresql://postgres:...` in your `.env`.
+  The `postgres` superuser has no password by default.
+  **Fix:** remove `DATABASE_URL` from `.env` entirely and let the entrypoint build it, or override only via `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`.
+  Also use `127.0.0.1` not `localhost` — on some systems `localhost` resolves to `::1` (IPv6) which can trip up the connection.
+
+**`TypeError: unhashable type: ‘dict’` on `GET /`**
+
+* Caused by a Starlette 1.x API change. The old calling convention was:
+  ```python
+  templates.TemplateResponse("index.html", {"request": request})
+  ```
+  The new one (Starlette ≥ 0.37 / 1.x) is:
+  ```python
+  templates.TemplateResponse(request, "index.html")
+  ```
+  This is already fixed in `main.py`.
+
 **I open [http://localhost:8000](http://localhost:8000) and see nothing / errors**
 
 * Confirm `templates/index.html` exists inside the container:
@@ -147,21 +175,12 @@ curl http://localhost:8000/task_status/<TASK_ID>
   docker logs -f fpsvc
   ```
 
-**Container asks for a Postgres password on startup**
-
-* The entrypoint uses **UNIX socket + peer auth** for admin tasks (no password).
-  Ensure you’re not calling `psql -h 127.0.0.1 -U postgres` in the script—use:
-
-  ```bash
-  su -s /bin/bash postgres -c "psql -c '...'"
-  ```
-
 **`DATABASE_URL not set` error**
 
 * The entrypoint exports a default DSN. If you overrode it, ensure it’s valid:
 
   ```
-  postgresql://<user>:<password>@<host>:<port>/<database>
+  postgresql://<user>:<password>@127.0.0.1:<port>/<database>
   ```
 
 **Tables disappear on restart**
@@ -176,12 +195,12 @@ curl http://localhost:8000/task_status/<TASK_ID>
 
 **Tavily / arXiv / Wikipedia errors**
 
-* Provide `TAVILY_API_KEY` and ensure network access, provide in the root dir and `.env` file as follows:
-```
-# OpenAI API Key
-OPENAI_API_KEY=your-open-api-key
-TAVILY_API_KEY=your-tavily-api-key
-```
+* Provide `TAVILY_API_KEY` and ensure network access. Your `.env` should look like:
+
+  ```
+  OPENAI_API_KEY=your-open-api-key
+  TAVILY_API_KEY=your-tavily-api-key
+  ```
 
 * Wikipedia rate limits sometimes; try later or handle exceptions gracefully.
 

@@ -21,9 +21,11 @@ done
 : "${POSTGRES_DB:=appdb}"
 
 
-# Creates role if it does not exist
+# Creates role if it does not exist, otherwise ensures the password is up to date
 if ! su -s /bin/bash postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'\"" | grep -q 1; then
   su -s /bin/bash postgres -c "psql -c \"CREATE USER ${POSTGRES_USER} WITH PASSWORD '${POSTGRES_PASSWORD}';\""
+else
+  su -s /bin/bash postgres -c "psql -c \"ALTER USER ${POSTGRES_USER} WITH PASSWORD '${POSTGRES_PASSWORD}';\""
 fi
 
 # Creates DB if does not exist
