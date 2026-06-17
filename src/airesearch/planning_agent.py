@@ -1,3 +1,5 @@
+import ast
+import contextlib
 import json
 import re
 
@@ -6,6 +8,70 @@ from aisuite import Client
 from airesearch.agents import editor_agent, research_agent, writer_agent
 
 client = Client()
+MIN_STEPS = 2
+
+_REQUIRED_FIRST = (
+    "Research agent: Use Tavily to perform a broad web search and collect top"
+    " relevant items (title, authors, year, venue/source, URL, DOI if available)."
+)
+_REQUIRED_SECOND = (
+    "Research agent: For each collected item, search on arXiv to find matching"
+    " preprints/versions and record arXiv URLs (if they exist)."
+)
+_FINAL_REQUIRED = (
+    "Writer agent: Generate the final comprehensive Markdown report with inline"
+    " citations and a complete References section with clickable links."
+)
+
+
+def _coerce_to_list(s: str) -> list[str]:
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
+            return obj[:7]
+    except json.JSONDecodeError:
+        pass
+    with contextlib.suppress(ValueError, SyntaxError):
+        obj = ast.literal_eval(s)
+        if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
+            return obj[:7]
+    if s.startswith("```") and s.endswith("```"):
+        inner = s.strip("`")
+        with contextlib.suppress(ValueError, SyntaxError):
+            obj = ast.literal_eval(inner)
+            if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
+                return obj[:7]
+    return []
+
+
+def _ensure_contract(steps_list: list[str]) -> list[str]:
+    if not steps_list:
+        return [
+            _REQUIRED_FIRST,
+            _REQUIRED_SECOND,
+            (
+                "Research agent: Synthesize and rank findings by relevance,"
+                " recency, and authority; deduplicate by title/DOI."
+            ),
+            "Writer agent: Draft a structured outline based on the ranked evidence.",
+            (
+                "Editor agent: Review for coherence, coverage, and citation"
+                " completeness; request fixes."
+            ),
+            _FINAL_REQUIRED,
+        ]
+    steps_list = [s for s in steps_list if isinstance(s, str)]
+    if not steps_list or steps_list[0] != _REQUIRED_FIRST:
+        steps_list = [_REQUIRED_FIRST, *steps_list]
+    if len(steps_list) < MIN_STEPS or steps_list[1] != _REQUIRED_SECOND:
+        steps_list = (
+            [steps_list[0]]
+            + [_REQUIRED_SECOND]
+            + [s for s in steps_list[1:] if "arXiv" not in s or "For each collected item" in s]
+        )
+    if _FINAL_REQUIRED not in steps_list:
+        steps_list.append(_FINAL_REQUIRED)
+    return steps_list[:7]
 
 
 def clean_json_block(raw: str) -> str:
@@ -14,9 +80,6 @@ def clean_json_block(raw: str) -> str:
         raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
     return raw.strip("` \n")
-
-
-import ast
 
 
 def planner_agent(topic: str, model: str = "openai:o4-mini") -> list[str]:
@@ -41,14 +104,6 @@ def planner_agent(topic: str, model: str = "openai:o4-mini") -> list[str]:
         "🎯 Produce a clear step-by-step research plan **as a valid Python list of strings**"
         " (no markdown, no explanations)."
     )
-    step_first = (
-        '"Research agent: Use Tavily to perform a broad web search and collect top'
-        ' relevant items (title, authors, year, venue/source, URL, DOI if available)."'
-    )
-    step_second = (
-        '"Research agent: For each collected item, search on arXiv to find matching'
-        ' preprints/versions and record arXiv URLs (if they exist)."'
-    )
     prompt = f"""
 {intro}
 
@@ -65,9 +120,9 @@ Maximum of 7 steps.
 🚫 DO NOT include steps like "create CSV", "set up repo", "install packages".
 ✅ Focus on meaningful research tasks (search, extract, rank, draft, revise).
 ✅ The FIRST step MUST be exactly:
-{step_first}
+"{_REQUIRED_FIRST}"
 ✅ The SECOND step MUST be exactly:
-{step_second}
+"{_REQUIRED_SECOND}"
 
 🔚 The FINAL step MUST instruct the writer agent to generate a comprehensive Markdown report that:
 - Uses all findings and outputs from previous steps
@@ -86,84 +141,7 @@ Topic: "{topic}"
     )
 
     raw = response.choices[0].message.content.strip()
-
-    # --- robust parsing: JSON -> ast -> fallback ---
-    def _coerce_to_list(s: str) -> list[str]:
-        # try strict JSON
-        try:
-            obj = json.loads(s)
-            if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
-                return obj[:7]
-        except json.JSONDecodeError:
-            pass
-        # try Python literal list
-        try:
-            obj = ast.literal_eval(s)
-            if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
-                return obj[:7]
-        except Exception:
-            pass
-        # try to extract code fence if present
-        if s.startswith("```") and s.endswith("```"):
-            inner = s.strip("`")
-            try:
-                obj = ast.literal_eval(inner)
-                if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
-                    return obj[:7]
-            except Exception:
-                pass
-        return []
-
-    steps = _coerce_to_list(raw)
-
-    # enforce ordering & minimal contract
-    required_first = (
-        "Research agent: Use Tavily to perform a broad web search and collect top"
-        " relevant items (title, authors, year, venue/source, URL, DOI if available)."
-    )
-    required_second = (
-        "Research agent: For each collected item, search on arXiv to find matching"
-        " preprints/versions and record arXiv URLs (if they exist)."
-    )
-    final_required = (
-        "Writer agent: Generate the final comprehensive Markdown report with inline"
-        " citations and a complete References section with clickable links."
-    )
-
-    def _ensure_contract(steps_list: list[str]) -> list[str]:
-        if not steps_list:
-            return [
-                required_first,
-                required_second,
-                (
-                    "Research agent: Synthesize and rank findings by relevance,"
-                    " recency, and authority; deduplicate by title/DOI."
-                ),
-                "Writer agent: Draft a structured outline based on the ranked evidence.",
-                (
-                    "Editor agent: Review for coherence, coverage, and citation"
-                    " completeness; request fixes."
-                ),
-                final_required,
-            ]
-        # inject/replace first two if missing or out of order
-        steps_list = [s for s in steps_list if isinstance(s, str)]
-        if not steps_list or steps_list[0] != required_first:
-            steps_list = [required_first, *steps_list]
-        if len(steps_list) < 2 or steps_list[1] != required_second:
-            # remove any generic arxiv step that is not tied to Tavily results
-            steps_list = (
-                [steps_list[0]]
-                + [required_second]
-                + [s for s in steps_list[1:] if "arXiv" not in s or "For each collected item" in s]
-            )
-        # ensure final step requirement present
-        if final_required not in steps_list:
-            steps_list.append(final_required)
-        # cap to 7
-        return steps_list[:7]
-
-    return _ensure_contract(steps)
+    return _ensure_contract(_coerce_to_list(raw))
 
 
 def executor_agent_step(

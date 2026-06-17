@@ -1,5 +1,6 @@
+import contextlib
 import json as _json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aisuite import Client
 
@@ -9,11 +10,9 @@ client = Client()
 
 
 # === Research Agent ===
-def research_agent(
-    prompt: str,
-    model: str = "openai:gpt-4.1-mini",
-) -> tuple[str, list[dict[str, str]]]:
 
+
+def _build_research_prompt(prompt: str) -> str:
     ra_intro = (
         "You are an advanced research assistant with expertise in information retrieval"
         " and academic research methodology. Your mission is to gather comprehensive,"
@@ -31,7 +30,7 @@ def research_agent(
         "   - BEST FOR: Scientific evidence, theoretical frameworks, and technical"
         " details in supported fields"
     )
-    full_prompt = f"""
+    return f"""
 {ra_intro}
 
 ## AVAILABLE RESEARCH TOOLS:
@@ -83,12 +82,56 @@ Present your research findings in a structured format that includes:
 3. **Source Details**: Include URLs, titles, authors, and publication dates
 4. **Limitations**: Note any gaps in available information
 
-Today is {datetime.now().strftime("%Y-%m-%d")}.
+Today is {datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")}.
 
 USER RESEARCH REQUEST:
 {prompt}
 """.strip()
 
+
+def _collect_tool_calls_html(resp: object) -> str:
+    calls: list[tuple[str, str]] = []
+
+    for ir in getattr(resp, "intermediate_responses", []) or []:
+        with contextlib.suppress(AttributeError, IndexError):
+            tcs = ir.choices[0].message.tool_calls or []
+            calls.extend((tc.function.name, tc.function.arguments) for tc in tcs)
+
+    final_msg = getattr(resp, "choices", [{}])[0].message
+    for msg in getattr(final_msg, "intermediate_messages", []) or []:
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            calls.extend((tc.function.name, tc.function.arguments) for tc in msg.tool_calls)
+
+    seen: set[tuple[str, str]] = set()
+    dedup_calls: list[tuple[str, str]] = []
+    for name, args in calls:
+        key = (name, args)
+        if key not in seen:
+            seen.add(key)
+            dedup_calls.append((name, args))
+
+    tool_lines = []
+    for name, args in dedup_calls:
+        arg_text = str(args)
+        with contextlib.suppress(_json.JSONDecodeError, TypeError, ValueError):
+            parsed = _json.loads(args) if isinstance(args, str) else args
+            if isinstance(parsed, dict):
+                kv = ", ".join(f"{k}={v!r}" for k, v in parsed.items())
+                arg_text = kv
+        tool_lines.append(f"- {name}({arg_text})")
+
+    if not tool_lines:
+        return ""
+    header = "<h2 style='font-size:1.5em; color:#2563eb;'>📎 Tools used</h2>"
+    items = "<ul>" + "".join(f"<li>{line}</li>" for line in tool_lines) + "</ul>"
+    return header + items
+
+
+def research_agent(
+    prompt: str,
+    model: str = "openai:gpt-4.1-mini",
+) -> tuple[str, list[dict[str, str]]]:
+    full_prompt = _build_research_prompt(prompt)
     messages = [{"role": "user", "content": full_prompt}]
     tools = [arxiv_search_tool, tavily_search_tool, wikipedia_search_tool]
 
@@ -99,60 +142,16 @@ USER RESEARCH REQUEST:
             tools=tools,
             tool_choice="auto",
             max_turns=5,
-            temperature=0.0,  # Use deterministic output
+            temperature=0.0,
         )
-
         content = resp.choices[0].message.content or ""
-
-        # ---- Collect tool calls from intermediate_responses and intermediate_messages
-        calls = []
-
-        # A) From intermediate_responses
-        for ir in getattr(resp, "intermediate_responses", []) or []:
-            try:
-                tcs = ir.choices[0].message.tool_calls or []
-                calls.extend((tc.function.name, tc.function.arguments) for tc in tcs)
-            except Exception:
-                pass
-
-        # B) From intermediate_messages on the final message
-        for msg in getattr(resp.choices[0].message, "intermediate_messages", []) or []:
-            # assistant message with tool_calls
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                calls.extend((tc.function.name, tc.function.arguments) for tc in msg.tool_calls)
-
-        # Dedup while preserving order
-        seen = set()
-        dedup_calls = []
-        for name, args in calls:
-            key = (name, args)
-            if key not in seen:
-                seen.add(key)
-                dedup_calls.append((name, args))
-
-        # Pretty print args: JSON->dict if possible
-        tool_lines = []
-        for name, args in dedup_calls:
-            arg_text = str(args)
-            try:
-                parsed = _json.loads(args) if isinstance(args, str) else args
-                if isinstance(parsed, dict):
-                    kv = ", ".join(f"{k}={v!r}" for k, v in parsed.items())
-                    arg_text = kv
-            except Exception:
-                # keep raw string if not JSON
-                pass
-            tool_lines.append(f"- {name}({arg_text})")
-
-        if tool_lines:
-            tools_html = "<h2 style='font-size:1.5em; color:#2563eb;'>📎 Tools used</h2>"
-            tools_html += "<ul>" + "".join(f"<li>{line}</li>" for line in tool_lines) + "</ul>"
-            content += "\n\n" + tools_html
-
-        return content, messages
-
-    except Exception as e:
+        tools_section = _collect_tool_calls_html(resp)
+        if tools_section:
+            content += "\n\n" + tools_section
+    except (RuntimeError, OSError, ValueError) as e:
         return f"[Model Error: {e!s}]", messages
+    else:
+        return content, messages
 
 
 def writer_agent(

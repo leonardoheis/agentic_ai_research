@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -127,9 +128,83 @@ def format_history(history: list[list[str]]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_step_card(
+    prompt: str,
+    agent_name: str,
+    description: str,
+    output: str,
+    history: list,
+) -> dict[str, str]:
+    def esc(s: str) -> str:
+        return html.escape(s or "")
+
+    content = f"""
+<div style='border:1px solid #ccc; border-radius:8px; padding:10px; margin:8px 0; background:#fff;'>
+  <div style='font-weight:bold; color:#2563eb;'>📘 User Prompt</div>
+  <div style='white-space:pre-wrap;'>{esc(prompt)}</div>
+
+  <div style='font-weight:bold; color:#16a34a; margin-top:8px;'>📜 Previous Step</div>
+  <pre style='white-space:pre-wrap; background:#f9fafb; padding:6px; border-radius:6px; margin:0;'>
+{format_history(history[-2:-1])}
+  </pre>
+
+  <div style='font-weight:bold; color:#f59e0b; margin-top:8px;'>🧹 Your next task</div>
+  <div style='white-space:pre-wrap;'>{esc(description)}</div>
+
+  <div style='font-weight:bold; color:#10b981; margin-top:8px;'>✅ Output</div>
+  <div style='white-space:pre-wrap;'>
+{esc(output)}
+  </div>
+</div>
+""".strip()
+    return {"title": f"Called {agent_name}", "content": content}
+
+
+def _persist_task_done(task_id: str, result: dict[str, Any]) -> None:
+    db = SessionLocal()
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task:
+        task.status = "done"
+        task.result = json.dumps(result)
+        task.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    db.close()
+
+
+def _persist_task_error(task_id: str) -> None:
+    db = SessionLocal()
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task:
+        task.status = "error"
+        task.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    db.close()
+
+
+UpdateFn = Callable[[int, str, str, dict[str, Any] | None], None]
+
+
+def _execute_plan_steps(
+    plan_steps: list,
+    prompt: str,
+    execution_history: list,
+    update_fn: UpdateFn,
+) -> None:
+    for i, step_title in enumerate(plan_steps):
+        update_fn(i, "running", f"Executing: {step_title}", None)
+        description, agent_name, output = executor_agent_step(step_title, execution_history, prompt)
+        execution_history.append([step_title, description, output])
+        update_fn(
+            i,
+            "done",
+            f"Completed: {step_title}",
+            _build_step_card(prompt, agent_name, description, output, execution_history),
+        )
+
+
 def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list) -> None:
     steps_data = task_progress[task_id]["steps"]
-    execution_history = []
+    execution_history: list = []
 
     def update_step_status(
         index: int, status: str, description: str = "", substep: dict[str, Any] | None = None
@@ -143,83 +218,21 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list) -> N
             steps_data[index]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        for i, plan_step_title in enumerate(initial_plan_steps):
-            update_step_status(i, "running", f"Executing: {plan_step_title}")
+        _execute_plan_steps(initial_plan_steps, prompt, execution_history, update_step_status)
+        final_report = execution_history[-1][-1] if execution_history else "No report generated."
+        _persist_task_done(task_id, {"html_report": final_report, "history": steps_data})
 
-            actual_step_description, agent_name, output = executor_agent_step(
-                plan_step_title, execution_history, prompt
-            )
-
-            execution_history.append([plan_step_title, actual_step_description, output])
-
-            def esc(s: str) -> str:
-                return html.escape(s or "")
-
-            def nl2br(s: str) -> str:
-                return esc(s).replace("\n", "<br>")
-
-            # ...
-            update_step_status(
-                i,
-                "done",
-                f"Completed: {plan_step_title}",
-                {
-                    "title": f"Called {agent_name}",
-                    "content": f"""
-<div style='border:1px solid #ccc; border-radius:8px; padding:10px; margin:8px 0; background:#fff;'>
-  <div style='font-weight:bold; color:#2563eb;'>📘 User Prompt</div>
-  <div style='white-space:pre-wrap;'>{esc(prompt)}</div>
-
-  <div style='font-weight:bold; color:#16a34a; margin-top:8px;'>📜 Previous Step</div>
-  <pre style='white-space:pre-wrap; background:#f9fafb; padding:6px; border-radius:6px; margin:0;'>
-{format_history(execution_history[-2:-1])}
-  </pre>
-
-  <div style='font-weight:bold; color:#f59e0b; margin-top:8px;'>🧹 Your next task</div>
-  <div style='white-space:pre-wrap;'>{esc(actual_step_description)}</div>
-
-  <div style='font-weight:bold; color:#10b981; margin-top:8px;'>✅ Output</div>
-  <div style='white-space:pre-wrap;'>
-{esc(output)}
-  </div>
-</div>
-""".strip(),
-                },
-            )
-
-        final_report_markdown = (
-            execution_history[-1][-1] if execution_history else "No report generated."
-        )
-
-        result = {"html_report": final_report_markdown, "history": steps_data}
-
-        db = SessionLocal()
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = "done"
-            task.result = json.dumps(result)
-            task.updated_at = datetime.now(timezone.utc)
-            db.commit()
-        db.close()
-
-    except Exception as e:
+    except (RuntimeError, OSError, ValueError) as e:
         if steps_data:
-            error_step_index = next(
+            error_index = next(
                 (i for i, s in enumerate(steps_data) if s["status"] == "running"),
                 len(steps_data) - 1,
             )
-            if error_step_index >= 0:
+            if error_index >= 0:
                 update_step_status(
-                    error_step_index,
+                    error_index,
                     "error",
                     f"Error during execution: {e}",
                     {"title": "Error", "content": str(e)},
                 )
-
-        db = SessionLocal()
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = "error"
-            task.updated_at = datetime.now(timezone.utc)
-            db.commit()
-        db.close()
+        _persist_task_error(task_id)

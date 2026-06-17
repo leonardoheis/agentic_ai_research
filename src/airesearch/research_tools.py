@@ -1,12 +1,19 @@
+from __future__ import annotations
+
 import contextlib
 import os
 import pathlib
 import re
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from io import BytesIO
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
+if TYPE_CHECKING:
+    from xml.etree.ElementTree import Element
+
+import defusedxml.ElementTree as ET
 import fitz  # PyMuPDF
 import requests
 import wikipedia
@@ -130,7 +137,7 @@ class _PdfConfig:
     sleep_seconds: float = 1.0
 
 
-def _parse_arxiv_entry(entry: ET.Element) -> dict:
+def _parse_arxiv_entry(entry: Element) -> dict[str, Any]:
     """Extract metadata from a single Atom <entry> element.
 
     Returns:
@@ -169,7 +176,7 @@ def _parse_arxiv_entry(entry: ET.Element) -> dict:
     }
 
 
-def _enrich_item_with_pdf(item: dict, cfg: _PdfConfig) -> None:
+def _enrich_item_with_pdf(item: dict[str, Any], cfg: _PdfConfig) -> None:
     """Fetch the PDF for *item* and overwrite its summary with extracted text (in-place)."""
     link_pdf = item.get("link_pdf")
     if not link_pdf:
@@ -194,13 +201,13 @@ def _enrich_item_with_pdf(item: dict, cfg: _PdfConfig) -> None:
         item["text_error"] = f"Text extraction failed: {e}"
 
 
-def _collect_arxiv_items(root: ET.Element, cfg: _PdfConfig, *, enrich: bool) -> list[dict]:
+def _collect_arxiv_items(root: Element, cfg: _PdfConfig, *, enrich: bool) -> list[dict[str, Any]]:
     """Parse all Atom entries and optionally enrich each with PDF text.
 
     Returns:
-        list[dict]: One dict per arXiv entry with metadata (and summary if enriched).
+        list[dict[str, Any]]: One dict per arXiv entry with metadata (and summary if enriched).
     """
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for entry in root.findall("atom:entry", _ARXIV_NS):
         item = _parse_arxiv_entry(entry)
         if enrich:
@@ -212,19 +219,20 @@ def _collect_arxiv_items(root: ET.Element, cfg: _PdfConfig, *, enrich: bool) -> 
 def arxiv_search_tool(
     query: str,
     max_results: int = 3,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Search arXiv and return results with full-text summaries extracted from PDFs.
 
     Returns:
-        list[dict]: One dict per result with keys: title, authors, published, url, summary,
-            link_pdf. On failure returns a single-element list with an ``error`` key.
+        list[dict[str, Any]]: One dict per result with keys: title, authors, published,
+            url, summary, link_pdf. On failure returns a single-element list with an
+            ``error`` key.
     """
     cfg = _PdfConfig()
     enrich = True  # fetch PDF and extract text
 
     api_url = (
         "https://export.arxiv.org/api/query"
-        f"?search_query=all:{requests.utils.quote(query)}&start=0&max_results={max_results}"
+        f"?search_query=all:{quote(query)}&start=0&max_results={max_results}"
     )
 
     try:
@@ -262,8 +270,8 @@ arxiv_tool_def = {
 
 
 def tavily_search_tool(
-    query: str, max_results: int = 5, include_images: bool = False
-) -> list[dict]:
+    query: str, max_results: int = 5, *, include_images: bool = False
+) -> list[dict[str, Any]]:
     """
     Perform a search using the Tavily API.
     Args:
@@ -335,7 +343,7 @@ tavily_tool_def = {
 # Wikipedia search tool
 
 
-def wikipedia_search_tool(query: str, sentences: int = 5) -> list[dict]:
+def wikipedia_search_tool(query: str, sentences: int = 5) -> list[dict[str, Any]]:
     """
     Searches Wikipedia for a summary of the given query.
 

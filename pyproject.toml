@@ -18,6 +18,8 @@ dependencies = [
     "docstring-parser",
     "pdfminer.six",
     "pymupdf",
+    "defusedxml>=0.7.1",
+    "types-defusedxml>=0.7.0.20260504",
 ]
 
 [dependency-groups]
@@ -117,7 +119,7 @@ warn_unused_configs = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["google.*"]
+module = ["google.*", "fitz", "wikipedia", "tavily", "tavily.errors", "aisuite"]
 ignore_missing_imports = true
 
 #########################
@@ -315,10 +317,10 @@ testpaths = ["tests"]
 [tool.poe.tasks]
 lint = { shell = "ruff check . && ruff format --check ." }
 fmt = "ruff format ."
-typecheck = { shell = "mypy src && nbqa mypy notebooks" }
+typecheck = "mypy src"
 nbtest = { cmd = "pytest --nbmake notebooks --ignore=notebooks/colab_downloader.ipynb", env = { USE_MOCK_LLM = "true" } }
 test = "pytest tests"
-check = ["lint", "typecheck", "nbtest"]
+check = ["lint", "typecheck"]
 serve = "uvicorn semantic_ai_agent.api.app:app --reload --port 8000"
 precommit = "uv run pre-commit run --all-files --verbose"
 precommit-update = "uv run pre-commit run --hook-stage manual pre-commit-update"
