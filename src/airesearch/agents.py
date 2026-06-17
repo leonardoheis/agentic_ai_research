@@ -1,22 +1,14 @@
 from datetime import datetime
-from urllib import response
+
 from aisuite import Client
-from src.research_tools import (
-    arxiv_search_tool,
-    tavily_search_tool,
-    wikipedia_search_tool,
-)
+
+from airesearch.research_tools import arxiv_search_tool, tavily_search_tool, wikipedia_search_tool
 
 client = Client()
 
 
 # === Research Agent ===
-def research_agent(
-    prompt: str, model: str = "openai:gpt-4.1-mini", return_messages: bool = False
-):
-    print("==================================")
-    print("🔍 Research Agent")
-    print("==================================")
+def research_agent(prompt: str, model: str = "openai:gpt-4.1-mini", return_messages: bool = False):
 
     full_prompt = f"""
 You are an advanced research assistant with expertise in information retrieval and academic research methodology. Your mission is to gather comprehensive, accurate, and relevant information on any topic requested by the user.
@@ -98,8 +90,7 @@ USER RESEARCH REQUEST:
         for ir in getattr(resp, "intermediate_responses", []) or []:
             try:
                 tcs = ir.choices[0].message.tool_calls or []
-                for tc in tcs:
-                    calls.append((tc.function.name, tc.function.arguments))
+                calls.extend((tc.function.name, tc.function.arguments) for tc in tcs)
             except Exception:
                 pass
 
@@ -107,8 +98,7 @@ USER RESEARCH REQUEST:
         for msg in getattr(resp.choices[0].message, "intermediate_messages", []) or []:
             # assistant message with tool_calls
             if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    calls.append((tc.function.name, tc.function.arguments))
+                calls.extend((tc.function.name, tc.function.arguments) for tc in msg.tool_calls)
 
         # Dedup while preserving order
         seen = set()
@@ -128,7 +118,7 @@ USER RESEARCH REQUEST:
 
                 parsed = _json.loads(args) if isinstance(args, str) else args
                 if isinstance(parsed, dict):
-                    kv = ", ".join(f"{k}={repr(v)}" for k, v in parsed.items())
+                    kv = ", ".join(f"{k}={v!r}" for k, v in parsed.items())
                     arg_text = kv
             except Exception:
                 # keep raw string if not JSON
@@ -136,20 +126,14 @@ USER RESEARCH REQUEST:
             tool_lines.append(f"- {name}({arg_text})")
 
         if tool_lines:
-            tools_html = (
-                "<h2 style='font-size:1.5em; color:#2563eb;'>📎 Tools used</h2>"
-            )
-            tools_html += (
-                "<ul>" + "".join(f"<li>{line}</li>" for line in tool_lines) + "</ul>"
-            )
+            tools_html = "<h2 style='font-size:1.5em; color:#2563eb;'>📎 Tools used</h2>"
+            tools_html += "<ul>" + "".join(f"<li>{line}</li>" for line in tool_lines) + "</ul>"
             content += "\n\n" + tools_html
 
-        print("✅ Output:\n", content)
         return content, messages
 
     except Exception as e:
-        print("❌ Error:", e)
-        return f"[Model Error: {str(e)}]", messages
+        return f"[Model Error: {e!s}]", messages
 
 
 def writer_agent(
@@ -158,11 +142,7 @@ def writer_agent(
     min_words_total: int = 2400,
     min_words_per_section: int = 400,
     max_tokens: int = 15000,
-    retries: int = 1,
 ):
-    print("==================================")
-    print("✍️ Writer Agent")
-    print("==================================")
 
     system_message = """
 You are an expert academic writer with a PhD-level understanding of scholarly communication. Your task is to synthesize research materials into a comprehensive, well-structured academic report.
@@ -234,15 +214,8 @@ INTERNAL CHECKLIST (DO NOT INCLUDE IN OUTPUT):
         )
         return resp.choices[0].message.content or ""
 
-    def _word_count(md_text: str) -> int:
-        import re
-
-        words = re.findall(r"\b\w+\b", md_text)
-        return len(words)
-
     content = _call(messages)
 
-    print("✅ Output:\n", content)
     return content, messages
 
 
@@ -251,9 +224,6 @@ def editor_agent(
     model: str = "openai:gpt-4.1-mini",
     target_min_words: int = 2400,
 ):
-    print("==================================")
-    print("🧠 Editor Agent")
-    print("==================================")
 
     system_message = """
 You are a professional academic editor with expertise in improving scholarly writing across disciplines. Your task is to refine and elevate the quality of the academic text provided.
@@ -287,10 +257,7 @@ Return only the revised, polished text in Markdown format without explanatory co
         {"role": "user", "content": prompt},
     ]
 
-    response = client.chat.completions.create(
-        model=model, messages=messages, temperature=0
-    )
+    response = client.chat.completions.create(model=model, messages=messages, temperature=0)
 
-    content = response.choices[0].message.content
-    print("✅ Output:\n", content)
+    content = response.choices[0].message.content or ""
     return content, messages

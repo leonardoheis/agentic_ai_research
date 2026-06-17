@@ -1,33 +1,34 @@
-import os
-import uuid
+import contextlib
+import html
 import json
+import os
 import threading
-from datetime import datetime
-from typing import Optional, Literal
+import uuid
+from datetime import datetime, timezone
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Text, DateTime, String
-from sqlalchemy.orm import sessionmaker, declarative_base
-from dotenv import load_dotenv
+from sqlalchemy import Column, DateTime, String, Text, create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-from src.planning_agent import planner_agent, executor_agent_step
-
-import html, textwrap
+from airesearch.planning_agent import executor_agent_step, planner_agent
 
 # === Load env vars ===
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+if not DATABASE_URL:
+    msg = "DATABASE_URL not set"
+    raise RuntimeError(msg)
+
 # Fix for Heroku's postgres:// URL format
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL not set")
 
 
 # === DB setup ===
@@ -41,26 +42,17 @@ class Task(Base):
     id = Column(String, primary_key=True, index=True)
     prompt = Column(Text)
     status = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     result = Column(Text)
 
 
-try:
-    Base.metadata.drop_all(bind=engine)
-except Exception as e:
-    print(f"\u274c DB creation failed: {e}")
-
-try:
+with contextlib.suppress(Exception):
     Base.metadata.create_all(bind=engine)
-except Exception as e:
-    print(f"\u274c DB creation failed: {e}")
 
 # === FastAPI ===
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -92,14 +84,12 @@ def generate_report(req: PromptRequest):
     task_progress[task_id] = {"steps": []}
     initial_plan_steps = planner_agent(req.prompt)
     for step_title in initial_plan_steps:
-        task_progress[task_id]["steps"].append(
-            {
-                "title": step_title,
-                "status": "pending",
-                "description": "Awaiting execution",
-                "substeps": [],
-            }
-        )
+        task_progress[task_id]["steps"].append({
+            "title": step_title,
+            "status": "pending",
+            "description": "Awaiting execution",
+            "substeps": [],
+        })
 
     thread = threading.Thread(
         target=run_agent_workflow, args=(task_id, req.prompt, initial_plan_steps)
@@ -127,23 +117,27 @@ def get_task_status(task_id: str):
 
 
 def format_history(history):
-    return "\n\n".join(
-        f"🔹 {title}\n{desc}\n\n📝 Output:\n{output}" for title, desc, output in history
-    )
+    parts = []
+    for title, desc, output in history:
+        parts.append(
+            f"🔹 {html.escape(title or '')}\n{html.escape(desc or '')}"
+            f"\n\n📝 Output:\n{html.escape(output or '')}"
+        )
+    return "\n\n".join(parts)
 
 
-def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
+def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list) -> None:
     steps_data = task_progress[task_id]["steps"]
     execution_history = []
 
-    def update_step_status(index, status, description="", substep=None):
+    def update_step_status(index, status, description="", substep=None) -> None:
         if index < len(steps_data):
             steps_data[index]["status"] = status
             if description:
                 steps_data[index]["description"] = description
             if substep:
                 steps_data[index]["substeps"].append(substep)
-            steps_data[index]["updated_at"] = datetime.utcnow().isoformat()
+            steps_data[index]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
         for i, plan_step_title in enumerate(initial_plan_steps):
@@ -171,7 +165,7 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
                     "content": f"""
 <div style='border:1px solid #ccc; border-radius:8px; padding:10px; margin:8px 0; background:#fff;'>
   <div style='font-weight:bold; color:#2563eb;'>📘 User Prompt</div>
-  <div style='white-space:pre-wrap;'>{prompt}</div>
+  <div style='white-space:pre-wrap;'>{esc(prompt)}</div>
 
   <div style='font-weight:bold; color:#16a34a; margin-top:8px;'>📜 Previous Step</div>
   <pre style='white-space:pre-wrap; background:#f9fafb; padding:6px; border-radius:6px; margin:0;'>
@@ -179,12 +173,11 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
   </pre>
 
   <div style='font-weight:bold; color:#f59e0b; margin-top:8px;'>🧹 Your next task</div>
-  <div style='white-space:pre-wrap;'>{actual_step_description}</div>
+  <div style='white-space:pre-wrap;'>{esc(actual_step_description)}</div>
 
   <div style='font-weight:bold; color:#10b981; margin-top:8px;'>✅ Output</div>
-  <!-- ⚠️ NO <pre> AQUÍ -->
   <div style='white-space:pre-wrap;'>
-{output}
+{esc(output)}
   </div>
 </div>
 """.strip(),
@@ -199,14 +192,14 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
 
         db = SessionLocal()
         task = db.query(Task).filter(Task.id == task_id).first()
-        task.status = "done"
-        task.result = json.dumps(result)
-        task.updated_at = datetime.utcnow()
-        db.commit()
+        if task:
+            task.status = "done"
+            task.result = json.dumps(result)
+            task.updated_at = datetime.now(timezone.utc)
+            db.commit()
         db.close()
 
     except Exception as e:
-        print(f"Workflow error for task {task_id}: {e}")
         if steps_data:
             error_step_index = next(
                 (i for i, s in enumerate(steps_data) if s["status"] == "running"),
@@ -222,7 +215,8 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
 
         db = SessionLocal()
         task = db.query(Task).filter(Task.id == task_id).first()
-        task.status = "error"
-        task.updated_at = datetime.utcnow()
-        db.commit()
+        if task:
+            task.status = "error"
+            task.updated_at = datetime.now(timezone.utc)
+            db.commit()
         db.close()

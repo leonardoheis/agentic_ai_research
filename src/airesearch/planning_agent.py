@@ -1,13 +1,9 @@
 import json
 import re
-from typing import List
-from datetime import datetime
+
 from aisuite import Client
-from src.agents import (
-    research_agent,
-    writer_agent,
-    editor_agent,
-)
+
+from airesearch.agents import editor_agent, research_agent, writer_agent
 
 client = Client()
 
@@ -20,11 +16,10 @@ def clean_json_block(raw: str) -> str:
     return raw.strip("` \n")
 
 
-from typing import List
-import json, ast
+import ast
 
 
-def planner_agent(topic: str, model: str = "openai:o4-mini") -> List[str]:
+def planner_agent(topic: str, model: str = "openai:o4-mini") -> list[str]:
     prompt = f"""
 You are a planning agent responsible for organizing a research workflow using multiple intelligent agents.
 
@@ -34,13 +29,13 @@ You are a planning agent responsible for organizing a research workflow using mu
 - Writer agent: drafts based on research findings.
 - Editor agent: reviews, reflects on, and improves drafts.
 
-🎯 Produce a clear step-by-step research plan **as a valid Python list of strings** (no markdown, no explanations). 
+🎯 Produce a clear step-by-step research plan **as a valid Python list of strings** (no markdown, no explanations).
 Each step must be atomic, actionable, and assigned to one of the agents.
 Maximum of 7 steps.
 
 🚫 DO NOT include steps like “create CSV”, “set up repo”, “install packages”.
 ✅ Focus on meaningful research tasks (search, extract, rank, draft, revise).
-✅ The FIRST step MUST be exactly: 
+✅ The FIRST step MUST be exactly:
 "Research agent: Use Tavily to perform a broad web search and collect top relevant items (title, authors, year, venue/source, URL, DOI if available)."
 ✅ The SECOND step MUST be exactly:
 "Research agent: For each collected item, search on arXiv to find matching preprints/versions and record arXiv URLs (if they exist)."
@@ -64,7 +59,7 @@ Topic: "{topic}"
     raw = response.choices[0].message.content.strip()
 
     # --- robust parsing: JSON -> ast -> fallback ---
-    def _coerce_to_list(s: str) -> List[str]:
+    def _coerce_to_list(s: str) -> list[str]:
         # try strict JSON
         try:
             obj = json.loads(s)
@@ -97,7 +92,7 @@ Topic: "{topic}"
     required_second = "Research agent: For each collected item, search on arXiv to find matching preprints/versions and record arXiv URLs (if they exist)."
     final_required = "Writer agent: Generate the final comprehensive Markdown report with inline citations and a complete References section with clickable links."
 
-    def _ensure_contract(steps_list: List[str]) -> List[str]:
+    def _ensure_contract(steps_list: list[str]) -> list[str]:
         if not steps_list:
             return [
                 required_first,
@@ -110,17 +105,13 @@ Topic: "{topic}"
         # inject/replace first two if missing or out of order
         steps_list = [s for s in steps_list if isinstance(s, str)]
         if not steps_list or steps_list[0] != required_first:
-            steps_list = [required_first] + steps_list
+            steps_list = [required_first, *steps_list]
         if len(steps_list) < 2 or steps_list[1] != required_second:
             # remove any generic arxiv step that is not tied to Tavily results
             steps_list = (
                 [steps_list[0]]
                 + [required_second]
-                + [
-                    s
-                    for s in steps_list[1:]
-                    if "arXiv" not in s or "For each collected item" in s
-                ]
+                + [s for s in steps_list[1:] if "arXiv" not in s or "For each collected item" in s]
             )
         # ensure final step requirement present
         if final_required not in steps_list:
@@ -128,9 +119,7 @@ Topic: "{topic}"
         # cap to 7
         return steps_list[:7]
 
-    steps = _ensure_contract(steps)
-
-    return steps
+    return _ensure_contract(steps)
 
 
 def executor_agent_step(step_title: str, history: list, prompt: str):
@@ -164,13 +153,12 @@ def executor_agent_step(step_title: str, history: list, prompt: str):
     step_lower = step_title.lower()
     if "research" in step_lower:
         content, _ = research_agent(prompt=enriched_task)
-        print("🔍 Research Agent Output:", content)
         return step_title, "research_agent", content
-    elif "draft" in step_lower or "write" in step_lower:
+    if "draft" in step_lower or "write" in step_lower:
         content, _ = writer_agent(prompt=enriched_task)
         return step_title, "writer_agent", content
-    elif "revise" in step_lower or "edit" in step_lower or "feedback" in step_lower:
+    if "revise" in step_lower or "edit" in step_lower or "feedback" in step_lower:
         content, _ = editor_agent(prompt=enriched_task)
         return step_title, "editor_agent", content
-    else:
-        raise ValueError(f"Unknown step type: {step_title}")
+    msg = f"Unknown step type: {step_title}"
+    raise ValueError(msg)

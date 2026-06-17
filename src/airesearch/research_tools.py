@@ -1,43 +1,18 @@
-from typing import List, Dict
-import requests
-import xml.etree.ElementTree as ET
-from typing import List, Dict, Optional
-import os, re, tempfile
-import requests
-from pdfminer.high_level import extract_text
-
-session = requests.Session()
-session.headers.update(
-    {"User-Agent": "LF-ADP-Agent/1.0 (mailto:your.email@example.com)"}
-)
-
-## -----
-
-from typing import List, Dict, Optional
-import os, re, time, tempfile
-import requests
-import xml.etree.ElementTree as ET
-
-# ----- Session with retries & headers -----
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-from typing import List, Dict, Optional
-import os, re, time
-import requests
+import os
+import pathlib
+import re
+import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
 
-
-from typing import List, Dict, Optional
-import os, re, time
 import requests
-import xml.etree.ElementTree as ET
-from io import BytesIO
-
-# ----- Session with retries & headers -----
+import wikipedia
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
+from tavily import TavilyClient
 from urllib3.util.retry import Retry
+
+load_dotenv()
 
 
 def _build_session(
@@ -105,7 +80,7 @@ def fetch_pdf_bytes(pdf_url: str, timeout: int = 90) -> bytes:
     return r.content
 
 
-def pdf_bytes_to_text(pdf_bytes: bytes, max_pages: Optional[int] = None) -> str:
+def pdf_bytes_to_text(pdf_bytes: bytes, max_pages: int | None = None) -> str:
     # 1) PyMuPDF
     try:
         import fitz  # PyMuPDF
@@ -114,8 +89,7 @@ def pdf_bytes_to_text(pdf_bytes: bytes, max_pages: Optional[int] = None) -> str:
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             n = len(doc)
             limit = n if max_pages is None else min(max_pages, n)
-            for i in range(limit):
-                out.append(doc.load_page(i).get_text("text"))
+            out.extend(doc.load_page(i).get_text("text") for i in range(limit))
         return "\n".join(out)
     except Exception:
         pass
@@ -129,41 +103,35 @@ def pdf_bytes_to_text(pdf_bytes: bytes, max_pages: Optional[int] = None) -> str:
         extract_text_to_fp(buf_in, buf_out)
         return buf_out.getvalue().decode("utf-8", errors="ignore")
     except Exception as e:
-        raise RuntimeError(f"PDF text extraction failed: {e}")
+        msg = f"PDF text extraction failed: {e}"
+        raise RuntimeError(msg)
 
 
 def maybe_save_pdf(pdf_bytes: bytes, dest_dir: str, filename: str) -> str:
-    os.makedirs(dest_dir, exist_ok=True)
+    pathlib.Path(dest_dir).mkdir(exist_ok=True, parents=True)
     path = os.path.join(dest_dir, _safe_filename(filename))
-    with open(path, "wb") as f:
-        f.write(pdf_bytes)
+    pathlib.Path(path).write_bytes(pdf_bytes)
     return path
 
 
 # ----- arXiv search -----
-from typing import List, Dict
-import time, requests, xml.etree.ElementTree as ET
-from io import BytesIO
-
-# session = _build_session()
-# ensure_pdf_url(), clean_text(), fetch_pdf_bytes(), pdf_bytes_to_text(), maybe_save_pdf()
 
 
 def arxiv_search_tool(
     query: str,
     max_results: int = 3,
-) -> List[Dict]:
+) -> list[dict]:
     """
     Busca en arXiv y devuelve resultados con `summary` sobrescrito
     para contener el texto extraído del PDF (full_text si es posible).
     """
     # ===== FLAGS INTERNOS =====
-    _INCLUDE_PDF = True
-    _EXTRACT_TEXT = True
-    _MAX_PAGES = 6
-    _TEXT_CHARS = 5000
-    _SAVE_FULL_TEXT = False
-    _SLEEP_SECONDS = 1.0
+    INCLUDE_PDF = True
+    EXTRACT_TEXT = True
+    MAX_PAGES = 6
+    TEXT_CHARS = 5000
+    SAVE_FULL_TEXT = False
+    SLEEP_SECONDS = 1.0
     # ==========================
 
     api_url = (
@@ -171,7 +139,7 @@ def arxiv_search_tool(
         f"?search_query=all:{requests.utils.quote(query)}&start=0&max_results={max_results}"
     )
 
-    out: List[Dict] = []
+    out: list[dict] = []
     try:
         resp = session.get(api_url, timeout=60)
         resp.raise_for_status()
@@ -219,22 +187,22 @@ def arxiv_search_tool(
             }
 
             pdf_bytes = None
-            if (_INCLUDE_PDF or _EXTRACT_TEXT) and link_pdf:
+            if (INCLUDE_PDF or EXTRACT_TEXT) and link_pdf:
                 try:
                     pdf_bytes = fetch_pdf_bytes(link_pdf, timeout=90)
-                    time.sleep(_SLEEP_SECONDS)
+                    time.sleep(SLEEP_SECONDS)
                 except Exception as e:
                     item["pdf_error"] = f"PDF fetch failed: {e}"
 
-            if _EXTRACT_TEXT and pdf_bytes:
+            if EXTRACT_TEXT and pdf_bytes:
                 try:
-                    text = pdf_bytes_to_text(pdf_bytes, max_pages=_MAX_PAGES)
+                    text = pdf_bytes_to_text(pdf_bytes, max_pages=MAX_PAGES)
                     text = clean_text(text) if text else ""
                     if text:
-                        if _SAVE_FULL_TEXT:
+                        if SAVE_FULL_TEXT:
                             item["summary"] = text
                         else:
-                            item["summary"] = text[:_TEXT_CHARS]
+                            item["summary"] = text[:TEXT_CHARS]
                 except Exception as e:
                     item["text_error"] = f"Text extraction failed: {e}"
 
@@ -264,16 +232,6 @@ arxiv_tool_def = {
 }
 
 
-## -----
-
-
-import os
-from dotenv import load_dotenv
-from tavily import TavilyClient
-
-load_dotenv()  # Loads environment variables from a .env file
-
-
 def tavily_search_tool(
     query: str, max_results: int = 5, include_images: bool = False
 ) -> list[dict]:
@@ -290,7 +248,8 @@ def tavily_search_tool(
     """
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
-        raise ValueError("TAVILY_API_KEY not found in environment variables.")
+        msg = "TAVILY_API_KEY not found in environment variables."
+        raise ValueError(msg)
 
     client = TavilyClient(api_key, api_base_url=os.getenv("DLAI_TAVILY_BASE_URL"))
 
@@ -299,19 +258,14 @@ def tavily_search_tool(
             query=query, max_results=max_results, include_images=include_images
         )
 
-        results = []
-        for r in response.get("results", []):
-            results.append(
-                {
+        results = [{
                     "title": r.get("title", ""),
                     "content": r.get("content", ""),
                     "url": r.get("url", ""),
-                }
-            )
+                } for r in response.get("results", [])]
 
         if include_images:
-            for img_url in response.get("images", []):
-                results.append({"image_url": img_url})
+            results.extend({"image_url": img_url} for img_url in response.get("images", []))
 
         return results
 
@@ -347,13 +301,10 @@ tavily_tool_def = {
     },
 }
 
-## Wikipedia search tool
-
-from typing import List, Dict
-import wikipedia
+# Wikipedia search tool
 
 
-def wikipedia_search_tool(query: str, sentences: int = 5) -> List[Dict]:
+def wikipedia_search_tool(query: str, sentences: int = 5) -> list[dict]:
     """
     Searches Wikipedia for a summary of the given query.
 
