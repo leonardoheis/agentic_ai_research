@@ -5,6 +5,7 @@ import os
 import threading
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -64,17 +65,17 @@ class PromptRequest(BaseModel):
 
 
 @app.get("/", response_class=HTMLResponse)
-def read_index(request: Request):
+def read_index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/api", response_class=JSONResponse)
-def health_check(request: Request):
+def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.post("/generate_report")
-def generate_report(req: PromptRequest):
+def generate_report(req: PromptRequest) -> dict[str, str]:
     task_id = str(uuid.uuid4())
     db = SessionLocal()
     db.add(Task(id=task_id, prompt=req.prompt, status="running"))
@@ -99,12 +100,12 @@ def generate_report(req: PromptRequest):
 
 
 @app.get("/task_progress/{task_id}")
-def get_task_progress(task_id: str):
+def get_task_progress(task_id: str) -> dict[str, Any]:
     return task_progress.get(task_id, {"steps": []})
 
 
 @app.get("/task_status/{task_id}")
-def get_task_status(task_id: str):
+def get_task_status(task_id: str) -> dict[str, Any]:
     db = SessionLocal()
     task = db.query(Task).filter(Task.id == task_id).first()
     db.close()
@@ -116,7 +117,7 @@ def get_task_status(task_id: str):
     }
 
 
-def format_history(history):
+def format_history(history: list[list[str]]) -> str:
     parts = []
     for title, desc, output in history:
         parts.append(
@@ -130,7 +131,9 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list) -> N
     steps_data = task_progress[task_id]["steps"]
     execution_history = []
 
-    def update_step_status(index, status, description="", substep=None) -> None:
+    def update_step_status(
+        index: int, status: str, description: str = "", substep: dict[str, Any] | None = None
+    ) -> None:
         if index < len(steps_data):
             steps_data[index]["status"] = status
             if description:

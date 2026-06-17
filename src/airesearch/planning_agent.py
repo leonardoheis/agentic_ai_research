@@ -20,25 +20,54 @@ import ast
 
 
 def planner_agent(topic: str, model: str = "openai:o4-mini") -> list[str]:
+    intro = (
+        "You are a planning agent responsible for organizing a research workflow"
+        " using multiple intelligent agents."
+    )
+    agent_web = (
+        "- Research agent: MUST begin with a broad **web search using Tavily** to identify"
+        " only **relevant** and **authoritative** items (e.g., high-impact venues, seminal"
+        " works, surveys, or recent comprehensive sources). The output of this step MUST"
+        " capture for each candidate: title, authors, year, venue/source, URL, and (if"
+        " available) DOI."
+    )
+    agent_arxiv = (
+        "- Research agent: AFTER the Tavily step, perform a **targeted arXiv search** ONLY"
+        " for the candidates discovered in the web step (match by title/author/DOI). If an"
+        " arXiv preprint/version exists, record its arXiv URL and version info. Do NOT run"
+        " a generic arXiv search detached from the Tavily results."
+    )
+    goal = (
+        "🎯 Produce a clear step-by-step research plan **as a valid Python list of strings**"
+        " (no markdown, no explanations)."
+    )
+    step_first = (
+        '"Research agent: Use Tavily to perform a broad web search and collect top'
+        ' relevant items (title, authors, year, venue/source, URL, DOI if available)."'
+    )
+    step_second = (
+        '"Research agent: For each collected item, search on arXiv to find matching'
+        ' preprints/versions and record arXiv URLs (if they exist)."'
+    )
     prompt = f"""
-You are a planning agent responsible for organizing a research workflow using multiple intelligent agents.
+{intro}
 
 🧠 Available agents:
-- Research agent: MUST begin with a broad **web search using Tavily** to identify only **relevant** and **authoritative** items (e.g., high-impact venues, seminal works, surveys, or recent comprehensive sources). The output of this step MUST capture for each candidate: title, authors, year, venue/source, URL, and (if available) DOI.
-- Research agent: AFTER the Tavily step, perform a **targeted arXiv search** ONLY for the candidates discovered in the web step (match by title/author/DOI). If an arXiv preprint/version exists, record its arXiv URL and version info. Do NOT run a generic arXiv search detached from the Tavily results.
+{agent_web}
+{agent_arxiv}
 - Writer agent: drafts based on research findings.
 - Editor agent: reviews, reflects on, and improves drafts.
 
-🎯 Produce a clear step-by-step research plan **as a valid Python list of strings** (no markdown, no explanations).
+{goal}
 Each step must be atomic, actionable, and assigned to one of the agents.
 Maximum of 7 steps.
 
-🚫 DO NOT include steps like “create CSV”, “set up repo”, “install packages”.
+🚫 DO NOT include steps like "create CSV", "set up repo", "install packages".
 ✅ Focus on meaningful research tasks (search, extract, rank, draft, revise).
 ✅ The FIRST step MUST be exactly:
-"Research agent: Use Tavily to perform a broad web search and collect top relevant items (title, authors, year, venue/source, URL, DOI if available)."
+{step_first}
 ✅ The SECOND step MUST be exactly:
-"Research agent: For each collected item, search on arXiv to find matching preprints/versions and record arXiv URLs (if they exist)."
+{step_second}
 
 🔚 The FINAL step MUST instruct the writer agent to generate a comprehensive Markdown report that:
 - Uses all findings and outputs from previous steps
@@ -88,18 +117,33 @@ Topic: "{topic}"
     steps = _coerce_to_list(raw)
 
     # enforce ordering & minimal contract
-    required_first = "Research agent: Use Tavily to perform a broad web search and collect top relevant items (title, authors, year, venue/source, URL, DOI if available)."
-    required_second = "Research agent: For each collected item, search on arXiv to find matching preprints/versions and record arXiv URLs (if they exist)."
-    final_required = "Writer agent: Generate the final comprehensive Markdown report with inline citations and a complete References section with clickable links."
+    required_first = (
+        "Research agent: Use Tavily to perform a broad web search and collect top"
+        " relevant items (title, authors, year, venue/source, URL, DOI if available)."
+    )
+    required_second = (
+        "Research agent: For each collected item, search on arXiv to find matching"
+        " preprints/versions and record arXiv URLs (if they exist)."
+    )
+    final_required = (
+        "Writer agent: Generate the final comprehensive Markdown report with inline"
+        " citations and a complete References section with clickable links."
+    )
 
     def _ensure_contract(steps_list: list[str]) -> list[str]:
         if not steps_list:
             return [
                 required_first,
                 required_second,
-                "Research agent: Synthesize and rank findings by relevance, recency, and authority; deduplicate by title/DOI.",
+                (
+                    "Research agent: Synthesize and rank findings by relevance,"
+                    " recency, and authority; deduplicate by title/DOI."
+                ),
                 "Writer agent: Draft a structured outline based on the ranked evidence.",
-                "Editor agent: Review for coherence, coverage, and citation completeness; request fixes.",
+                (
+                    "Editor agent: Review for coherence, coverage, and citation"
+                    " completeness; request fixes."
+                ),
                 final_required,
             ]
         # inject/replace first two if missing or out of order
@@ -122,13 +166,22 @@ Topic: "{topic}"
     return _ensure_contract(steps)
 
 
-def executor_agent_step(step_title: str, history: list, prompt: str):
-    """
-    Executes a step of the executor agent.
+def executor_agent_step(
+    step_title: str, history: list[list[str]], prompt: str
+) -> tuple[str, str, str]:
+    """Execute a step of the research workflow by dispatching to the correct
+    agent.
+
+    Args:
+        step_title: Title of the step; used to select research, writer, or editor agent.
+        history: Prior steps as [title, description, output] triples.
+        prompt: The original user research prompt.
+
     Returns:
-        - step_title (str)
-        - agent_name (str)
-        - output (str)
+        A tuple of (step_title, agent_name, output).
+
+    Raises:
+        ValueError: If the step title does not match any known agent pattern.
     """
 
     # Construir contexto enriquecido estructurado

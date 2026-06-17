@@ -1,15 +1,20 @@
+import contextlib
 import os
 import pathlib
 import re
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from io import BytesIO
 
+import fitz  # PyMuPDF
 import requests
 import wikipedia
 from dotenv import load_dotenv
+from pdfminer.high_level import extract_text_to_fp
 from requests.adapters import HTTPAdapter
 from tavily import TavilyClient
+from tavily.errors import BadRequestError, UsageLimitExceededError
 from urllib3.util.retry import Retry
 
 load_dotenv()
@@ -19,14 +24,12 @@ def _build_session(
     user_agent: str = "LF-ADP-Agent/1.0 (mailto:your.email@example.com)",
 ) -> requests.Session:
     s = requests.Session()
-    s.headers.update(
-        {
-            "User-Agent": user_agent,
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-        }
-    )
+    s.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    })
     retry = Retry(
         total=5,
         connect=5,
@@ -58,8 +61,6 @@ def ensure_pdf_url(abs_or_pdf_url: str) -> str:
 
 
 def _safe_filename(name: str) -> str:
-    import re
-
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
@@ -80,66 +81,152 @@ def fetch_pdf_bytes(pdf_url: str, timeout: int = 90) -> bytes:
     return r.content
 
 
+def _extract_with_pymupdf(pdf_bytes: bytes, max_pages: int | None) -> str:
+    out: list[str] = []
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        n = len(doc)
+        limit = n if max_pages is None else min(max_pages, n)
+        out.extend(doc.load_page(i).get_text("text") for i in range(limit))
+    return "\n".join(out)
+
+
+def _extract_with_pdfminer(pdf_bytes: bytes) -> str:
+    buf_in = BytesIO(pdf_bytes)
+    buf_out = BytesIO()
+    extract_text_to_fp(buf_in, buf_out)
+    return buf_out.getvalue().decode("utf-8", errors="ignore")
+
+
 def pdf_bytes_to_text(pdf_bytes: bytes, max_pages: int | None = None) -> str:
-    # 1) PyMuPDF
+    with contextlib.suppress(ImportError, OSError):
+        return _extract_with_pymupdf(pdf_bytes, max_pages)
+
     try:
-        import fitz  # PyMuPDF
-
-        out = []
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            n = len(doc)
-            limit = n if max_pages is None else min(max_pages, n)
-            out.extend(doc.load_page(i).get_text("text") for i in range(limit))
-        return "\n".join(out)
-    except Exception:
-        pass
-
-    # 2) pdfminer.six
-    try:
-        from pdfminer.high_level import extract_text_to_fp
-
-        buf_in = BytesIO(pdf_bytes)
-        buf_out = BytesIO()
-        extract_text_to_fp(buf_in, buf_out)
-        return buf_out.getvalue().decode("utf-8", errors="ignore")
-    except Exception as e:
+        return _extract_with_pdfminer(pdf_bytes)
+    except (ImportError, OSError) as e:
         msg = f"PDF text extraction failed: {e}"
-        raise RuntimeError(msg)
+        raise RuntimeError(msg) from e
 
 
 def maybe_save_pdf(pdf_bytes: bytes, dest_dir: str, filename: str) -> str:
-    pathlib.Path(dest_dir).mkdir(exist_ok=True, parents=True)
-    path = os.path.join(dest_dir, _safe_filename(filename))
-    pathlib.Path(path).write_bytes(pdf_bytes)
-    return path
+    dest_path = pathlib.Path(dest_dir)
+    dest_path.mkdir(exist_ok=True, parents=True)
+    path = dest_path / _safe_filename(filename)
+    path.write_bytes(pdf_bytes)
+    return str(path)
 
 
 # ----- arXiv search -----
+
+_ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+
+@dataclass
+class _PdfConfig:
+    extract_text: bool = True
+    max_pages: int = 6
+    text_chars: int = 5000
+    save_full_text: bool = False
+    sleep_seconds: float = 1.0
+
+
+def _parse_arxiv_entry(entry: ET.Element) -> dict:
+    """Extract metadata from a single Atom <entry> element.
+
+    Returns:
+        dict: Keys: title, authors, published, url, summary, link_pdf.
+    """
+    ns = _ARXIV_NS
+    title = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
+    published = (entry.findtext("atom:published", default="", namespaces=ns) or "")[:10]
+    url_abs = entry.findtext("atom:id", default="", namespaces=ns) or ""
+    abstract = (entry.findtext("atom:summary", default="", namespaces=ns) or "").strip()
+
+    authors = [
+        nm
+        for a in entry.findall("atom:author", ns)
+        if (nm := a.findtext("atom:name", default="", namespaces=ns))
+    ]
+
+    link_pdf = next(
+        (
+            lnk.attrib.get("href")
+            for lnk in entry.findall("atom:link", ns)
+            if lnk.attrib.get("title") == "pdf"
+        ),
+        None,
+    )
+    if not link_pdf and url_abs:
+        link_pdf = ensure_pdf_url(url_abs)
+
+    return {
+        "title": title,
+        "authors": authors,
+        "published": published,
+        "url": url_abs,
+        "summary": abstract,
+        "link_pdf": link_pdf,
+    }
+
+
+def _enrich_item_with_pdf(item: dict, cfg: _PdfConfig) -> None:
+    """Fetch the PDF for *item* and overwrite its summary with extracted text (in-place)."""
+    link_pdf = item.get("link_pdf")
+    if not link_pdf:
+        return
+
+    pdf_bytes: bytes | None = None
+    try:
+        pdf_bytes = fetch_pdf_bytes(link_pdf, timeout=90)
+        time.sleep(cfg.sleep_seconds)
+    except requests.exceptions.RequestException as e:
+        item["pdf_error"] = f"PDF fetch failed: {e}"
+
+    if not cfg.extract_text or not pdf_bytes:
+        return
+
+    try:
+        text = pdf_bytes_to_text(pdf_bytes, max_pages=cfg.max_pages)
+        text = clean_text(text) if text else ""
+        if text:
+            item["summary"] = text if cfg.save_full_text else text[: cfg.text_chars]
+    except RuntimeError as e:
+        item["text_error"] = f"Text extraction failed: {e}"
+
+
+def _collect_arxiv_items(root: ET.Element, cfg: _PdfConfig, *, enrich: bool) -> list[dict]:
+    """Parse all Atom entries and optionally enrich each with PDF text.
+
+    Returns:
+        list[dict]: One dict per arXiv entry with metadata (and summary if enriched).
+    """
+    out: list[dict] = []
+    for entry in root.findall("atom:entry", _ARXIV_NS):
+        item = _parse_arxiv_entry(entry)
+        if enrich:
+            _enrich_item_with_pdf(item, cfg)
+        out.append(item)
+    return out
 
 
 def arxiv_search_tool(
     query: str,
     max_results: int = 3,
 ) -> list[dict]:
+    """Search arXiv and return results with full-text summaries extracted from PDFs.
+
+    Returns:
+        list[dict]: One dict per result with keys: title, authors, published, url, summary,
+            link_pdf. On failure returns a single-element list with an ``error`` key.
     """
-    Busca en arXiv y devuelve resultados con `summary` sobrescrito
-    para contener el texto extraído del PDF (full_text si es posible).
-    """
-    # ===== FLAGS INTERNOS =====
-    INCLUDE_PDF = True
-    EXTRACT_TEXT = True
-    MAX_PAGES = 6
-    TEXT_CHARS = 5000
-    SAVE_FULL_TEXT = False
-    SLEEP_SECONDS = 1.0
-    # ==========================
+    cfg = _PdfConfig()
+    enrich = True  # fetch PDF and extract text
 
     api_url = (
         "https://export.arxiv.org/api/query"
         f"?search_query=all:{requests.utils.quote(query)}&start=0&max_results={max_results}"
     )
 
-    out: list[dict] = []
     try:
         resp = session.get(api_url, timeout=60)
         resp.raise_for_status()
@@ -148,70 +235,12 @@ def arxiv_search_tool(
 
     try:
         root = ET.fromstring(resp.content)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-
-        for entry in root.findall("atom:entry", ns):
-            title = (
-                entry.findtext("atom:title", default="", namespaces=ns) or ""
-            ).strip()
-            published = (
-                entry.findtext("atom:published", default="", namespaces=ns) or ""
-            )[:10]
-            url_abs = entry.findtext("atom:id", default="", namespaces=ns) or ""
-            # original abstract
-            abstract_summary = (
-                entry.findtext("atom:summary", default="", namespaces=ns) or ""
-            ).strip()
-
-            authors = []
-            for a in entry.findall("atom:author", ns):
-                nm = a.findtext("atom:name", default="", namespaces=ns)
-                if nm:
-                    authors.append(nm)
-
-            link_pdf = None
-            for link in entry.findall("atom:link", ns):
-                if link.attrib.get("title") == "pdf":
-                    link_pdf = link.attrib.get("href")
-                    break
-            if not link_pdf and url_abs:
-                link_pdf = ensure_pdf_url(url_abs)
-
-            item = {
-                "title": title,
-                "authors": authors,
-                "published": published,
-                "url": url_abs,
-                "summary": abstract_summary,
-                "link_pdf": link_pdf,
-            }
-
-            pdf_bytes = None
-            if (INCLUDE_PDF or EXTRACT_TEXT) and link_pdf:
-                try:
-                    pdf_bytes = fetch_pdf_bytes(link_pdf, timeout=90)
-                    time.sleep(SLEEP_SECONDS)
-                except Exception as e:
-                    item["pdf_error"] = f"PDF fetch failed: {e}"
-
-            if EXTRACT_TEXT and pdf_bytes:
-                try:
-                    text = pdf_bytes_to_text(pdf_bytes, max_pages=MAX_PAGES)
-                    text = clean_text(text) if text else ""
-                    if text:
-                        if SAVE_FULL_TEXT:
-                            item["summary"] = text
-                        else:
-                            item["summary"] = text[:TEXT_CHARS]
-                except Exception as e:
-                    item["text_error"] = f"Text extraction failed: {e}"
-
-            out.append(item)
-        return out
     except ET.ParseError as e:
         return [{"error": f"arXiv API XML parse failed: {e}"}]
-    except Exception as e:
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
         return [{"error": f"Unexpected error: {e}"}]
+    else:
+        return _collect_arxiv_items(root, cfg, enrich=enrich)
 
 
 # ---- Tool def ----
@@ -237,14 +266,14 @@ def tavily_search_tool(
 ) -> list[dict]:
     """
     Perform a search using the Tavily API.
-
     Args:
         query (str): The search query.
         max_results (int): Number of results to return (default 5).
         include_images (bool): Whether to include image results.
-
     Returns:
         List[dict]: A list of dictionaries with keys like 'title', 'content', and 'url'.
+    Raises:
+        ValueError: If the Tavily API key is not found in environment variables.
     """
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
@@ -257,20 +286,22 @@ def tavily_search_tool(
         response = client.search(
             query=query, max_results=max_results, include_images=include_images
         )
-
-        results = [{
-                    "title": r.get("title", ""),
-                    "content": r.get("content", ""),
-                    "url": r.get("url", ""),
-                } for r in response.get("results", [])]
-
+    except BadRequestError as e:
+        return [{"error": str(e)}]
+    except UsageLimitExceededError as e:
+        return [{"error": str(e)}]
+    else:
+        results = [
+            {
+                "title": r.get("title", ""),
+                "content": r.get("content", ""),
+                "url": r.get("url", ""),
+            }
+            for r in response.get("results", [])
+        ]
         if include_images:
             results.extend({"image_url": img_url} for img_url in response.get("images", []))
-
         return results
-
-    except Exception as e:
-        return [{"error": str(e)}]  # For LLM-friendly agents
 
 
 tavily_tool_def = {
@@ -320,9 +351,12 @@ def wikipedia_search_tool(query: str, sentences: int = 5) -> list[dict]:
         page = wikipedia.page(page_title)
         summary = wikipedia.summary(page_title, sentences=sentences)
 
+    except wikipedia.exceptions.DisambiguationError as e:
+        return [{"error": f"Disambiguation error: {e}"}]
+    except wikipedia.exceptions.PageError as e:
+        return [{"error": f"Page error: {e}"}]
+    else:
         return [{"title": page.title, "summary": summary, "url": page.url}]
-    except Exception as e:
-        return [{"error": str(e)}]
 
 
 # Tool definition

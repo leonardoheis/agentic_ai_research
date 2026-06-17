@@ -1,3 +1,4 @@
+import json as _json
 from datetime import datetime
 
 from aisuite import Client
@@ -8,16 +9,36 @@ client = Client()
 
 
 # === Research Agent ===
-def research_agent(prompt: str, model: str = "openai:gpt-4.1-mini", return_messages: bool = False):
+def research_agent(
+    prompt: str,
+    model: str = "openai:gpt-4.1-mini",
+) -> tuple[str, list[dict[str, str]]]:
 
+    ra_intro = (
+        "You are an advanced research assistant with expertise in information retrieval"
+        " and academic research methodology. Your mission is to gather comprehensive,"
+        " accurate, and relevant information on any topic requested by the user."
+    )
+    ra_tavily_use = (
+        "   - USE FOR: Recent news, current events, blogs, websites, industry reports,"
+        " and non-academic sources"
+    )
+    ra_tavily_best = (
+        "   - BEST FOR: Up-to-date information, diverse perspectives, practical"
+        " applications, and general knowledge"
+    )
+    ra_arxiv_best = (
+        "   - BEST FOR: Scientific evidence, theoretical frameworks, and technical"
+        " details in supported fields"
+    )
     full_prompt = f"""
-You are an advanced research assistant with expertise in information retrieval and academic research methodology. Your mission is to gather comprehensive, accurate, and relevant information on any topic requested by the user.
+{ra_intro}
 
 ## AVAILABLE RESEARCH TOOLS:
 
 1. **`tavily_search_tool`**: General web search engine
-   - USE FOR: Recent news, current events, blogs, websites, industry reports, and non-academic sources
-   - BEST FOR: Up-to-date information, diverse perspectives, practical applications, and general knowledge
+{ra_tavily_use}
+{ra_tavily_best}
 
 2. **`arxiv_search_tool`**: Academic publication database
    - USE FOR: Peer-reviewed research papers, technical reports, and scholarly articles
@@ -30,7 +51,7 @@ You are an advanced research assistant with expertise in information retrieval a
      * Quantitative Finance
      * Electrical Engineering and Systems Science
      * Economics
-   - BEST FOR: Scientific evidence, theoretical frameworks, and technical details in supported fields
+{ra_arxiv_best}
 
 3. **`wikipedia_search_tool`**: Encyclopedia resource
    - USE FOR: Background information, definitions, overviews, historical context
@@ -114,8 +135,6 @@ USER RESEARCH REQUEST:
         for name, args in dedup_calls:
             arg_text = str(args)
             try:
-                import json as _json
-
                 parsed = _json.loads(args) if isinstance(args, str) else args
                 if isinstance(parsed, dict):
                     kv = ", ".join(f"{k}={v!r}" for k, v in parsed.items())
@@ -139,13 +158,36 @@ USER RESEARCH REQUEST:
 def writer_agent(
     prompt: str,
     model: str = "openai:gpt-4.1-mini",
-    min_words_total: int = 2400,
-    min_words_per_section: int = 400,
     max_tokens: int = 15000,
-):
+) -> tuple[str, list[dict[str, str]]]:
 
-    system_message = """
-You are an expert academic writer with a PhD-level understanding of scholarly communication. Your task is to synthesize research materials into a comprehensive, well-structured academic report.
+    wa_intro = (
+        "You are an expert academic writer with a PhD-level understanding of scholarly"
+        " communication. Your task is to synthesize research materials into a"
+        " comprehensive, well-structured academic report."
+    )
+    wa_introduction = (
+        "3. **Introduction**: Present the topic, research question/problem, significance,"
+        " and outline of the report"
+    )
+    wa_methodology = (
+        "5. **Methodology**: If applicable, describe research methods, data collection,"
+        " and analytical approaches"
+    )
+    wa_discussion = (
+        "7. **Discussion**: Interpret findings, address implications, limitations,"
+        " and connections to broader field"
+    )
+    wa_html_links = (
+        '- Use html syntax to handle all links with target="_blank", so user can'
+        " always open link in new tab on both html and markdown format"
+    )
+    wa_output = (
+        "Output the complete report in Markdown format only. Do not include"
+        " meta-commentary about the writing process."
+    )
+    system_message = f"""
+{wa_intro}
 
 ## REPORT REQUIREMENTS:
 - Produce a COMPLETE, POLISHED, and PUBLICATION-READY academic report in Markdown format
@@ -156,11 +198,11 @@ You are an expert academic writer with a PhD-level understanding of scholarly co
 ## MANDATORY STRUCTURE:
 1. **Title**: Clear, concise, and descriptive of the content
 2. **Abstract**: Brief summary (100-150 words) of the report's purpose, methods, and key findings
-3. **Introduction**: Present the topic, research question/problem, significance, and outline of the report
+{wa_introduction}
 4. **Background/Literature Review**: Contextualize the topic within existing scholarship
-5. **Methodology**: If applicable, describe research methods, data collection, and analytical approaches
+{wa_methodology}
 6. **Key Findings/Results**: Present the primary outcomes and evidence
-7. **Discussion**: Interpret findings, address implications, limitations, and connections to broader field
+{wa_discussion}
 8. **Conclusion**: Synthesize main points and suggest directions for future research
 9. **References**: Complete list of all cited works
 
@@ -185,9 +227,9 @@ You are an expert academic writer with a PhD-level understanding of scholarly co
 - Include appropriate section headings and subheadings to organize content
 - Format any equations, tables, or figures according to academic conventions
 - Use bullet points or numbered lists when appropriate for clarity
-- Use html syntax to handle all links with target="_blank", so user can always open link in new tab on both html and markdown format
+{wa_html_links}
 
-Output the complete report in Markdown format only. Do not include meta-commentary about the writing process.
+{wa_output}
 
 INTERNAL CHECKLIST (DO NOT INCLUDE IN OUTPUT):
 - [ ] Incorporated all provided research materials
@@ -205,7 +247,7 @@ INTERNAL CHECKLIST (DO NOT INCLUDE IN OUTPUT):
         {"role": "user", "content": prompt},
     ]
 
-    def _call(messages_):
+    def _call(messages_: list[dict[str, str]]) -> str:
         resp = client.chat.completions.create(
             model=model,
             messages=messages_,
@@ -222,11 +264,23 @@ INTERNAL CHECKLIST (DO NOT INCLUDE IN OUTPUT):
 def editor_agent(
     prompt: str,
     model: str = "openai:gpt-4.1-mini",
-    target_min_words: int = 2400,
-):
+) -> tuple[str, list[dict[str, str]]]:
 
-    system_message = """
-You are a professional academic editor with expertise in improving scholarly writing across disciplines. Your task is to refine and elevate the quality of the academic text provided.
+    ea_intro = (
+        "You are a professional academic editor with expertise in improving scholarly"
+        " writing across disciplines. Your task is to refine and elevate the quality"
+        " of the academic text provided."
+    )
+    ea_equations = (
+        "- Add relevant equations, diagrams, or illustrations (described in markdown)"
+        " when they would enhance understanding"
+    )
+    ea_output = (
+        "Return only the revised, polished text in Markdown format without explanatory"
+        " comments about your edits."
+    )
+    system_message = f"""
+{ea_intro}
 
 ## Your Editing Process:
 1. Analyze the overall structure, argument flow, and coherence of the text
@@ -238,7 +292,7 @@ You are a professional academic editor with expertise in improving scholarly wri
 ## Specific Elements to Address:
 - Strengthen thesis statements and main arguments
 - Clarify complex concepts with additional explanations or examples where needed
-- Add relevant equations, diagrams, or illustrations (described in markdown) when they would enhance understanding
+{ea_equations}
 - Ensure proper integration of evidence and maintain academic rigor
 - Standardize terminology and eliminate redundancies
 - Improve sentence variety and paragraph structure
@@ -249,7 +303,7 @@ You are a professional academic editor with expertise in improving scholarly wri
 - Structure content with appropriate section headings and subheadings
 - Format equations, tables, and figures according to academic standards
 
-Return only the revised, polished text in Markdown format without explanatory comments about your edits.
+{ea_output}
 """.strip()
 
     messages = [
